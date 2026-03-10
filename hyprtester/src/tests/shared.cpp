@@ -1,5 +1,6 @@
 #include "shared.hpp"
 #include <csignal>
+#include <fstream>
 #include <cerrno>
 #include <thread>
 #include <print>
