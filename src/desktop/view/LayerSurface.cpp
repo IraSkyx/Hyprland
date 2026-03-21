@@ -335,7 +335,7 @@ void CLayerSurface::onCommit() {
             *m_alpha = PMONITOR->inFullscreenMode() ? (m_layer >= ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY ? 1.F : 0.F) : 1.F;
 
             if (m_layer == ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND || m_layer == ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM)
-                PMONITOR->m_blurFBDirty = true; // so that blur is recalc'd
+                g_pHyprOpenGL->markBlurDirtyForMonitor(PMONITOR); // so that blur is recalc'd
 
             if (g_pSeatManager->m_state.pointerFocus == m_wlSurface->resource())
                 g_pInputManager->simulateMouseMovement();
