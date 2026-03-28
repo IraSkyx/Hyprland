@@ -1910,6 +1910,11 @@ void CWindow::mapWindow() {
     if (m_pinned && !m_isFloating)
         m_pinned = false;
 
+    // let plugins override placement before workspace assignment and layout
+    Event::bus()->m_events.window.preMap.emit(m_self.lock());
+    if (!m_preMapRequestedWorkspace.empty())
+        requestedWorkspace = std::move(m_preMapRequestedWorkspace);
+
     CVarList2 WORKSPACEARGS = CVarList2(std::move(requestedWorkspace), 0, ' ', false, false);
 
     if (!WORKSPACEARGS[0].empty()) {

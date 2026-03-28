@@ -171,6 +171,10 @@ namespace Desktop::View {
         // For nofocus
         bool m_noInitialFocus = false;
 
+        // Plugin-requested workspace during preMap. If non-empty, mapWindow
+        // uses this instead of the workspace from window rules.
+        std::string m_preMapRequestedWorkspace;
+
         // Fullscreen and Maximize
         bool      m_wantsInitialFullscreen        = false;
         MONITORID m_wantsInitialFullscreenMonitor = MONITOR_INVALID;

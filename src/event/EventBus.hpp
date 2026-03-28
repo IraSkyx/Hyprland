@@ -41,6 +41,7 @@ namespace Event {
             struct {
                 Event<PHLWINDOW>                        open;
                 Event<PHLWINDOW>                        openEarly;
+                Event<PHLWINDOW>                        preMap;
                 Event<PHLWINDOW>                        destroy;
                 Event<PHLWINDOW>                        close;
                 Event<PHLWINDOW>                        kill;
