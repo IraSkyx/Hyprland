@@ -175,6 +175,14 @@ namespace Desktop::View {
         // uses this instead of the workspace from window rules.
         std::string m_preMapRequestedWorkspace;
 
+        // Session restore: slot ID for layout placeholder filling.
+        // Set by plugin during preMap, consumed by layout algorithm in addTarget.
+        std::string m_sessionSlotId;
+
+        // Session restore: when true the window is mapped but not rendered.
+        // Used for ambiguous self-restoring app windows that need explicit assignment.
+        bool m_sessionHeld = false;
+
         // Fullscreen and Maximize
         bool      m_wantsInitialFullscreen        = false;
         MONITORID m_wantsInitialFullscreenMonitor = MONITOR_INVALID;

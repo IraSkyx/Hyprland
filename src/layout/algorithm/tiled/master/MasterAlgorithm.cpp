@@ -31,6 +31,18 @@ struct Layout::Tiled::SMasterNodeData {
 
     bool        ignoreFullscreenChecks = false;
 
+    std::string slotId;  // session restore: non-empty = placeholder slot
+
+    bool isPlaceholder() const {
+        return !slotId.empty() && !pTarget;
+    }
+
+    // apply computed geometry to the target window (no-op for placeholders)
+    void applyGeometry() {
+        if (pTarget)
+            pTarget->setPositionGlobal({position, size});
+    }
+
     //
     bool operator==(const SMasterNodeData& rhs) const {
         return pTarget.lock() == rhs.pTarget.lock();
@@ -46,6 +58,21 @@ void CMasterAlgorithm::movedTarget(SP<ITarget> target, std::optional<Vector2D> f
 }
 
 void CMasterAlgorithm::addTarget(SP<ITarget> target, bool firstMap) {
+    // session restore: fill a matching placeholder slot if one exists
+    if (target->window() && !target->window()->m_sessionSlotId.empty()) {
+        const auto slotId = target->window()->m_sessionSlotId;
+        target->window()->m_sessionSlotId.clear();
+        for (auto& node : m_masterNodesData) {
+            if (node->slotId == slotId) {
+                node->pTarget = target;
+                node->slotId.clear();
+                calculateWorkspace();
+                return;
+            }
+        }
+        // no matching slot, fall through to normal placement
+    }
+
     static auto PNEWONACTIVE = CConfigValue<std::string>("master:new_on_active");
     static auto PNEWONTOP    = CConfigValue<Hyprlang::INT>("master:new_on_top");
     static auto PNEWSTATUS   = CConfigValue<std::string>("master:new_status");
@@ -1020,7 +1047,7 @@ void CMasterAlgorithm::calculateWorkspace() {
             PMASTERNODE->position = WORKAREA.pos();
         }
 
-        PMASTERNODE->pTarget->setPositionGlobal({PMASTERNODE->position, PMASTERNODE->size});
+        PMASTERNODE->applyGeometry();
         return;
     } else if (orientation == ORIENTATION_TOP || orientation == ORIENTATION_BOTTOM) {
         const float HEIGHT      = STACKWINDOWS != 0 ? WORKAREA.h * PMASTERNODE->percMaster : WORKAREA.h;
@@ -1047,7 +1074,7 @@ void CMasterAlgorithm::calculateWorkspace() {
 
             nd->size     = Vector2D(WIDTH, HEIGHT);
             nd->position = WORKAREA.pos() + Vector2D(nextX, nextY);
-            nd->pTarget->setPositionGlobal({nd->position, nd->size});
+            nd->applyGeometry();
 
             mastersLeft--;
             widthLeft -= WIDTH;
@@ -1084,7 +1111,7 @@ void CMasterAlgorithm::calculateWorkspace() {
 
             nd->size     = Vector2D(WIDTH, HEIGHT);
             nd->position = (*PIGNORERESERVED && centerMasterWindow ? WORKAREA.pos() - Vector2D(reservedLeft, 0.0) : WORKAREA.pos()) + Vector2D(nextX, nextY);
-            nd->pTarget->setPositionGlobal({nd->position, nd->size});
+            nd->applyGeometry();
 
             mastersLeft--;
             heightLeft -= HEIGHT;
@@ -1121,7 +1148,7 @@ void CMasterAlgorithm::calculateWorkspace() {
 
             nd->size     = Vector2D(WIDTH, HEIGHT);
             nd->position = WORKAREA.pos() + Vector2D(nextX, nextY);
-            nd->pTarget->setPositionGlobal({nd->position, nd->size});
+            nd->applyGeometry();
 
             slavesLeft--;
             widthLeft -= WIDTH;
@@ -1151,7 +1178,7 @@ void CMasterAlgorithm::calculateWorkspace() {
 
             nd->size     = Vector2D(WIDTH, HEIGHT);
             nd->position = WORKAREA.pos() + Vector2D(nextX, nextY);
-            nd->pTarget->setPositionGlobal({nd->position, nd->size});
+            nd->applyGeometry();
 
             slavesLeft--;
             heightLeft -= HEIGHT;
@@ -1228,7 +1255,7 @@ void CMasterAlgorithm::calculateWorkspace() {
 
             nd->size     = Vector2D(*PIGNORERESERVED ? (WIDTH - (onRight ? reservedRight : reservedLeft)) : WIDTH, HEIGHT);
             nd->position = WORKAREA.pos() + Vector2D(nextX, nextY);
-            nd->pTarget->setPositionGlobal({nd->position, nd->size});
+            nd->applyGeometry();
 
             if (onRight) {
                 heightLeftR -= HEIGHT;
@@ -1306,4 +1333,133 @@ SP<SMasterNodeData> CMasterAlgorithm::getClosestNode(const Vector2D& point) {
         }
     }
     return res;
+}
+
+// --------- session restore --------- //
+
+bool CMasterAlgorithm::hasSlots() const {
+    for (auto& n : m_masterNodesData) {
+        if (n->isPlaceholder())
+            return true;
+    }
+    return false;
+}
+
+std::string CMasterAlgorithm::serializeLayout() const {
+    auto orientation = const_cast<CMasterAlgorithm*>(this)->getDynamicOrientation();
+    static const char* orientNames[] = {"left", "top", "right", "bottom", "center"};
+
+    std::string windows = "[";
+    bool first = true;
+    for (auto& n : m_masterNodesData) {
+        if (!first) windows += ",";
+        first = false;
+        std::string addr = "unknown";
+        if (n->pTarget && n->pTarget->window())
+            addr = std::format("0x{:x}", n->pTarget->window());
+        else if (!n->slotId.empty())
+            addr = n->slotId;
+        windows += std::format(
+            R"({{"address":"{}","isMaster":{},"percMaster":{:.6f},"percSize":{:.6f}}})",
+            addr,
+            n->isMaster ? "true" : "false",
+            n->percMaster,
+            n->percSize);
+    }
+    windows += "]";
+
+    return std::format(
+        R"({{"algorithm":"master","orientation":"{}","windows":{}}})",
+        orientNames[static_cast<int>(orientation)],
+        windows);
+}
+
+bool CMasterAlgorithm::importLayout(const std::string& json) {
+    m_masterNodesData.clear();
+
+    // parse orientation
+    auto findStr = [&](const std::string& key) -> std::string {
+        auto kpos = json.find("\"" + key + "\"");
+        if (kpos == std::string::npos) return "";
+        auto cpos = json.find(':', kpos + key.size() + 2);
+        if (cpos == std::string::npos) return "";
+        auto vpos = cpos + 1;
+        while (vpos < json.size() && json[vpos] == ' ') vpos++;
+        if (vpos >= json.size()) return "";
+        if (json[vpos] == '"') {
+            auto epos = json.find('"', vpos + 1);
+            if (epos == std::string::npos) return "";
+            return json.substr(vpos + 1, epos - vpos - 1);
+        }
+        auto epos = json.find_first_of(",} \n", vpos);
+        if (epos == std::string::npos) epos = json.size();
+        return json.substr(vpos, epos - vpos);
+    };
+
+    auto orientStr = findStr("orientation");
+    eOrientation orient = ORIENTATION_LEFT;
+    if (orientStr == "top") orient = ORIENTATION_TOP;
+    else if (orientStr == "right") orient = ORIENTATION_RIGHT;
+    else if (orientStr == "bottom") orient = ORIENTATION_BOTTOM;
+    else if (orientStr == "center") orient = ORIENTATION_CENTER;
+    m_workspaceData.explicitOrientation = orient;
+
+    // parse windows array
+    auto wpos = json.find("\"windows\"");
+    if (wpos == std::string::npos) return false;
+    auto apos = json.find('[', wpos);
+    if (apos == std::string::npos) return false;
+
+    // iterate over objects in the array
+    size_t pos = apos + 1;
+    while (pos < json.size()) {
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == ',' || json[pos] == '\n'))
+            pos++;
+        if (pos >= json.size() || json[pos] == ']') break;
+        if (json[pos] != '{') break;
+
+        // find closing brace for this object
+        int depth = 0;
+        size_t objStart = pos, objEnd = pos;
+        for (size_t i = pos; i < json.size(); i++) {
+            if (json[i] == '{') depth++;
+            else if (json[i] == '}') {
+                depth--;
+                if (depth == 0) { objEnd = i; break; }
+            }
+        }
+
+        std::string obj = json.substr(objStart, objEnd - objStart + 1);
+
+        auto findObjStr = [&](const std::string& key) -> std::string {
+            auto kp = obj.find("\"" + key + "\"");
+            if (kp == std::string::npos) return "";
+            auto cp = obj.find(':', kp + key.size() + 2);
+            if (cp == std::string::npos) return "";
+            auto vp = cp + 1;
+            while (vp < obj.size() && obj[vp] == ' ') vp++;
+            if (vp >= obj.size()) return "";
+            if (obj[vp] == '"') {
+                auto ep = obj.find('"', vp + 1);
+                if (ep == std::string::npos) return "";
+                return obj.substr(vp + 1, ep - vp - 1);
+            }
+            auto ep = obj.find_first_of(",} \n", vp);
+            if (ep == std::string::npos) ep = obj.size();
+            return obj.substr(vp, ep - vp);
+        };
+
+        auto node = m_masterNodesData.emplace_back(makeShared<SMasterNodeData>());
+        node->slotId     = findObjStr("address");
+        node->isMaster   = findObjStr("isMaster") == "true";
+        auto pm = findObjStr("percMaster");
+        if (!pm.empty()) { try { node->percMaster = std::stof(pm); } catch (...) {} }
+        auto ps = findObjStr("percSize");
+        if (!ps.empty()) { try { node->percSize = std::stof(ps); } catch (...) {} }
+
+        pos = objEnd + 1;
+    }
+
+    calculateWorkspace();
+    return !m_masterNodesData.empty();
 }

@@ -1,5 +1,7 @@
 #include "../../TiledAlgorithm.hpp"
 
+#include <string>
+
 namespace Layout {
     class CAlgorithm;
 }
@@ -27,6 +29,13 @@ namespace Layout::Tiled {
         virtual void                             swapTargets(SP<ITarget> a, SP<ITarget> b);
         virtual void                             moveTargetInDirection(SP<ITarget> t, Math::eDirection dir, bool silent);
 
+        // session restore: serialize BSP tree to JSON
+        std::string                              serializeTree() const;
+        // session restore: build BSP tree from JSON with placeholder slots
+        bool                                     importTree(const std::string& json);
+        // session restore: check if any placeholder slots exist
+        bool                                     hasSlots() const;
+
       private:
         std::vector<SP<SDwindleNodeData>> m_dwindleNodesData;
 
@@ -40,6 +49,7 @@ namespace Layout::Tiled {
         std::optional<Vector2D> m_overrideFocalPoint; // for onWindowCreatedTiling.
 
         void                    addTarget(SP<ITarget> target);
+        bool                    fillSlot(const std::string& slotId, SP<ITarget> target);
         void                    calculateWorkspace();
         SP<SDwindleNodeData>    getNodeFromTarget(SP<ITarget>);
         SP<SDwindleNodeData>    getNodeFromWindow(PHLWINDOW w);
@@ -47,11 +57,16 @@ namespace Layout::Tiled {
         SP<SDwindleNodeData>    getFirstNode();
         SP<SDwindleNodeData>    getClosestNode(const Vector2D&, SP<ITarget> skip = nullptr);
         SP<SDwindleNodeData>    getMasterNode();
+        SP<SDwindleNodeData>    getNodeBySlotId(const std::string& slotId);
 
         bool                    toggleSplit(SP<SDwindleNodeData>);
         bool                    swapSplit(SP<SDwindleNodeData>);
         void                    rotateSplit(SP<SDwindleNodeData>, int angle = 90);
         bool                    moveToRoot(SP<SDwindleNodeData>, bool stable = true);
+
+        // helpers for tree serialization
+        std::string             serializeNode(const SP<SDwindleNodeData>& node) const;
+        SP<SDwindleNodeData>    parseNode(const std::string& json, size_t& pos, const SP<SDwindleNodeData>& parent);
 
         Math::eDirection        m_overrideDirection = Math::DIRECTION_DEFAULT;
     };

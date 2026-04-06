@@ -12,6 +12,7 @@
 
 #include <hyprutils/utils/ScopeGuard.hpp>
 #include <hyprutils/string/VarList2.hpp>
+#include <format>
 
 using namespace Layout;
 using namespace Layout::Tiled;
@@ -29,10 +30,15 @@ struct Layout::Tiled::SDwindleNodeData {
     float                               splitRatio             = 1.f;
     bool                                valid                  = true;
     bool                                ignoreFullscreenChecks = false;
+    std::string                         slotId;  // session restore: non-empty = placeholder slot
 
     // For list lookup
     bool operator==(const SDwindleNodeData& rhs) const {
         return pTarget.lock() == rhs.pTarget.lock() && box == rhs.box && pParent == rhs.pParent && children[0] == rhs.children[0] && children[1] == rhs.children[1];
+    }
+
+    bool isPlaceholder() const {
+        return !slotId.empty() && !pTarget;
     }
 
     void recalcSizePosRecursive(bool force = false, bool horizontalOverride = false, bool verticalOverride = false) {
@@ -42,7 +48,8 @@ struct Layout::Tiled::SDwindleNodeData {
             static auto PFLMULT           = CConfigValue<Hyprlang::FLOAT>("dwindle:split_width_multiplier");
             static auto PPRECISEMOUSEMOVE = CConfigValue<Hyprlang::INT>("dwindle:precise_mouse_move");
 
-            if (*PPRESERVESPLIT == 0 && *PSMARTSPLIT == 0 && *PPRECISEMOUSEMOVE == 0)
+            // placeholders preserve their split direction unconditionally
+            if (!isPlaceholder() && *PPRESERVESPLIT == 0 && *PSMARTSPLIT == 0 && *PPRECISEMOUSEMOVE == 0)
                 splitTop = box.h * *PFLMULT > box.w;
 
             if (verticalOverride)
@@ -66,8 +73,9 @@ struct Layout::Tiled::SDwindleNodeData {
 
             children[0]->recalcSizePosRecursive(force);
             children[1]->recalcSizePosRecursive(force);
-        } else
+        } else if (pTarget)
             pTarget->setPositionGlobal(box);
+        // placeholder leaves (no pTarget) just hold their box
     }
 };
 
@@ -76,6 +84,16 @@ void CDwindleAlgorithm::newTarget(SP<ITarget> target) {
 }
 
 void CDwindleAlgorithm::addTarget(SP<ITarget> target) {
+    // session restore: if this target's window carries a slot assignment,
+    // try to fill a matching placeholder instead of normal placement
+    if (target->window() && !target->window()->m_sessionSlotId.empty()) {
+        const auto slotId = target->window()->m_sessionSlotId;
+        target->window()->m_sessionSlotId.clear();
+        if (fillSlot(slotId, target))
+            return;
+        // no matching placeholder, fall through to normal placement
+    }
+
     const auto WORK_AREA = m_parent->space()->workArea();
 
     const auto PNODE = m_dwindleNodesData.emplace_back(makeShared<SDwindleNodeData>());
@@ -843,6 +861,202 @@ bool CDwindleAlgorithm::moveToRoot(SP<SDwindleNodeData> x, bool stable) {
         std::swap(pRoot->children[0], pRoot->children[1]);
 
     pRoot->recalcSizePosRecursive();
+
+    return true;
+}
+
+// --------- session restore --------- //
+
+SP<SDwindleNodeData> CDwindleAlgorithm::getNodeBySlotId(const std::string& slotId) {
+    for (auto& n : m_dwindleNodesData) {
+        if (n->slotId == slotId)
+            return n;
+    }
+    return nullptr;
+}
+
+bool CDwindleAlgorithm::hasSlots() const {
+    for (auto& n : m_dwindleNodesData) {
+        if (!n->slotId.empty() && !n->pTarget)
+            return true;
+    }
+    return false;
+}
+
+bool CDwindleAlgorithm::fillSlot(const std::string& slotId, SP<ITarget> target) {
+    auto node = getNodeBySlotId(slotId);
+    if (!node || node->isNode)
+        return false;
+
+    node->pTarget = target;
+    node->slotId.clear();
+
+    // recalculate from the root to apply geometry to the newly filled leaf
+    if (auto root = getMasterNode(); root)
+        root->recalcSizePosRecursive();
+
+    return true;
+}
+
+std::string CDwindleAlgorithm::serializeNode(const SP<SDwindleNodeData>& node) const {
+    if (!node)
+        return "null";
+
+    if (node->isNode) {
+        // internal split node
+        return std::format(
+            R"({{"type":"split","splitTop":{},"splitRatio":{:.6f},"children":[{},{}]}})",
+            node->splitTop ? "true" : "false",
+            node->splitRatio,
+            serializeNode(node->children[0].lock()),
+            serializeNode(node->children[1].lock()));
+    }
+
+    // leaf node: real window or placeholder
+    if (node->pTarget && node->pTarget->window()) {
+        return std::format(
+            R"({{"type":"leaf","address":"0x{:x}"}})",
+            node->pTarget->window());
+    }
+
+    if (!node->slotId.empty()) {
+        return std::format(R"({{"type":"slot","id":"{}"}})", node->slotId);
+    }
+
+    return R"({"type":"leaf","address":"unknown"})";
+}
+
+std::string CDwindleAlgorithm::serializeTree() const {
+    auto root = const_cast<CDwindleAlgorithm*>(this)->getMasterNode();
+    if (!root)
+        return R"({"algorithm":"dwindle","root":null})";
+
+    return std::format(R"({{"algorithm":"dwindle","root":{}}})", serializeNode(root));
+}
+
+// minimal JSON parser for tree import: handles our known schema
+// expects cursor at opening '{' or 'n' for null
+SP<SDwindleNodeData> CDwindleAlgorithm::parseNode(const std::string& json, size_t& pos, const SP<SDwindleNodeData>& parent) {
+    // skip whitespace
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' || json[pos] == '\t' || json[pos] == '\r'))
+        pos++;
+
+    if (pos >= json.size())
+        return nullptr;
+
+    // null check
+    if (json.substr(pos, 4) == "null") {
+        pos += 4;
+        return nullptr;
+    }
+
+    if (json[pos] != '{')
+        return nullptr;
+
+    auto node    = m_dwindleNodesData.emplace_back(makeShared<SDwindleNodeData>());
+    node->self   = node;
+    node->pParent = parent;
+
+    // simple key extraction: find "key":"value" or "key":number or "key":bool
+    std::string type;
+
+    // find matching closing brace (respecting nesting)
+    size_t start = pos;
+    int depth = 0;
+    size_t end = pos;
+    for (size_t i = pos; i < json.size(); i++) {
+        if (json[i] == '{') depth++;
+        else if (json[i] == '}') {
+            depth--;
+            if (depth == 0) { end = i; break; }
+        }
+    }
+
+    auto findStr = [&](const std::string& key) -> std::string {
+        auto kpos = json.find("\"" + key + "\"", start);
+        if (kpos == std::string::npos || kpos > end)
+            return "";
+        // find the colon after key
+        auto cpos = json.find(':', kpos + key.size() + 2);
+        if (cpos == std::string::npos) return "";
+        // skip whitespace
+        auto vpos = cpos + 1;
+        while (vpos < json.size() && json[vpos] == ' ') vpos++;
+        if (vpos >= json.size()) return "";
+        if (json[vpos] == '"') {
+            auto epos = json.find('"', vpos + 1);
+            if (epos == std::string::npos) return "";
+            return json.substr(vpos + 1, epos - vpos - 1);
+        }
+        // non-string value
+        auto epos = json.find_first_of(",} \n", vpos);
+        if (epos == std::string::npos) epos = json.size();
+        return json.substr(vpos, epos - vpos);
+    };
+
+    type = findStr("type");
+
+    if (type == "split") {
+        node->isNode = true;
+        auto st = findStr("splitTop");
+        node->splitTop = (st == "true");
+        auto sr = findStr("splitRatio");
+        if (!sr.empty()) {
+            try { node->splitRatio = std::stof(sr); } catch (...) {}
+        }
+
+        // find "children":[ and parse two child nodes
+        auto cpos = json.find("\"children\"", start);
+        if (cpos != std::string::npos && cpos < end) {
+            auto bpos = json.find('[', cpos);
+            if (bpos != std::string::npos) {
+                pos = bpos + 1;
+                node->children[0] = parseNode(json, pos, node);
+                // skip comma
+                while (pos < json.size() && (json[pos] == ',' || json[pos] == ' ' || json[pos] == '\n'))
+                    pos++;
+                node->children[1] = parseNode(json, pos, node);
+                // skip to closing ]
+                while (pos < json.size() && json[pos] != ']') pos++;
+                if (pos < json.size()) pos++; // skip ]
+            }
+        }
+        // skip to closing }
+        pos = end + 1;
+    } else if (type == "slot") {
+        node->isNode = false;
+        node->slotId = findStr("id");
+        pos = end + 1;
+    } else {
+        // leaf with address, should not appear during import
+        pos = end + 1;
+    }
+
+    return node;
+}
+
+bool CDwindleAlgorithm::importTree(const std::string& json) {
+    // clear existing tree
+    m_dwindleNodesData.clear();
+
+    // find "root": in the top-level object
+    auto rpos = json.find("\"root\"");
+    if (rpos == std::string::npos)
+        return false;
+
+    auto cpos = json.find(':', rpos + 6);
+    if (cpos == std::string::npos)
+        return false;
+
+    size_t pos = cpos + 1;
+    auto root = parseNode(json, pos, nullptr);
+    if (!root)
+        return false;
+
+    // apply workspace work area to root and recalculate all boxes
+    const auto WORK_AREA = m_parent->space()->workArea();
+    root->box = WORK_AREA;
+    root->recalcSizePosRecursive();
 
     return true;
 }

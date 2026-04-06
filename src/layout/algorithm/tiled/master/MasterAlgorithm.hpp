@@ -50,6 +50,11 @@ namespace Layout::Tiled {
         virtual void                             swapTargets(SP<ITarget> a, SP<ITarget> b);
         virtual void                             moveTargetInDirection(SP<ITarget> t, Math::eDirection dir, bool silent);
 
+        // session restore
+        std::string                              serializeLayout() const;
+        bool                                     importLayout(const std::string& json);
+        bool                                     hasSlots() const;
+
       private:
         std::vector<SP<SMasterNodeData>> m_masterNodesData;
         SMasterWorkspaceData             m_workspaceData;
